@@ -1,0 +1,9 @@
+services:
+  semgrep-ui:
+    build: .
+    container_name: semgrep-ui
+    ports:
+      - "5001:5000"
+    volumes:
+      - "F:/:/host:ro"
+    restart: unless-stopped
