@@ -400,7 +400,7 @@ function fcard(r){return '<div class="f '+r.severity+'">'+
    '<span class="loc">'+esc(r.file)+':<span class="ln">'+r.line+'</span></span></div>'+
    '<div class="msg">'+esc(r.message)+'</div>'+
    '<div class="rid">'+esc(r.check_id)+'</div>'+
-   (r.code?'<pre>'+esc(r.code)+'</pre>':'')+'</div>';}
+   (r.code&&r.code!=='requires login'?'<pre>'+esc(r.code)+'</pre>':'')+'</div>';}
 function statCards(c){const n=c.ERROR+c.WARNING+c.INFO;return '<div class="stats">'+
    '<div class="stat c-all"><div class="n">'+n+'</div><div class="k">Total</div></div>'+
    '<div class="stat c-hi"><div class="n">'+c.ERROR+'</div><div class="k">Critiques</div></div>'+
@@ -458,8 +458,12 @@ function saveTabs(){
 }
 // au chargement: recupere les jobs du serveur, reconstruit les onglets
 async function restore(){
+ try{ await _restore(); }
+ catch(e){ console.error('restore',e); if(!TABS.length) welcome.style.display=''; }
+}
+async function _restore(){
  let jobs=[]; try{ jobs=await (await fetch('/jobs')).json(); }catch(e){}
- if(!jobs.length){ welcome.style.display=''; return; }
+ if(!Array.isArray(jobs) || !jobs.length){ welcome.style.display=''; return; }
  welcome.style.display='none';
  let pref={order:[],active:null};
  try{ pref=JSON.parse(localStorage.getItem('stv_tabs'))||pref; }catch(e){}
