@@ -20,7 +20,7 @@ CODE_EXT = {".py",".js",".jsx",".ts",".tsx",".java",".go",".rb",".php",".c",".h"
     ".vue",".html",".yaml",".yml",".json",".tf",".dockerfile",".sql",".m",".r"}
 SKIP_DIR = {"node_modules",".git","venv",".venv","__pycache__","dist","build",
     "vendor",".next","target",".idea",".vscode","site-packages"}
-CHUNK = 25
+CHUNK = 8
 
 def list_targets(root):
     files = []
@@ -31,6 +31,12 @@ def list_targets(root):
             if ext in CODE_EXT or fn.lower() in ("dockerfile",):
                 files.append(os.path.join(dp, fn))
     return files
+
+def _safe_json(s):
+    try:
+        return json.loads(s or "{}")
+    except Exception:
+        return {}
 
 def parse_results(data, results, counts):
     order = {"ERROR": 0, "WARNING": 1, "INFO": 2}
@@ -62,27 +68,52 @@ def run_scan(scan_id, target):
         total = len(targets)
         if total == 0:
             q.put(("log", "Aucun fichier de code trouve."))
-            q.put(("progress", {"pct": 100, "done": 0, "total": 0,
+            q.put(("progress", {"pct": 100, "phase": "Termine", "total": 0,
                                  "counts": counts, "new": []}))
         else:
             q.put(("log", f"{total} fichiers a scanner."))
-            done = 0
-            for i in range(0, total, CHUNK):
-                chunk = targets[i:i+CHUNK]
-                proc = subprocess.run(
-                    ["semgrep", "scan", "--config", "auto", "--json", "--quiet",
-                     "--no-git-ignore", *chunk],
-                    capture_output=True, text=True, timeout=600
-                )
-                try:
-                    data = json.loads(proc.stdout or "{}")
-                except Exception:
-                    data = {}
-                new = parse_results(data, results, counts)
-                done += len(chunk)
-                pct = round(done * 100 / total)
-                q.put(("progress", {"pct": pct, "done": done, "total": total,
-                                    "counts": dict(counts), "new": new}))
+            q.put(("progress", {"pct": 2, "phase": "Chargement des regles",
+                                "total": total, "counts": dict(counts), "new": []}))
+            # Estimation de duree: cout fixe (chargement regles) + par fichier.
+            est = 7.0 + total * 0.25
+            stop = threading.Event()
+
+            def ticker():
+                # fait avancer la barre jusqu'a 95% selon le temps ecoule / estimation
+                t0 = time.monotonic()
+                while not stop.wait(0.5):
+                    el = time.monotonic() - t0
+                    pct = min(95, round(2 + (el / est) * 93))
+                    phase = "Analyse en cours" if el > 4 else "Chargement des regles"
+                    q.put(("progress", {"pct": pct, "phase": phase, "total": total,
+                                        "counts": dict(counts), "new": []}))
+
+            tk = threading.Thread(target=ticker, daemon=True)
+            tk.start()
+            # On passe la liste de fichiers deja filtree (pas le dossier) pour que
+            # semgrep ne parcoure PAS target/, node_modules/ (peut etre enorme).
+            cmd = ["semgrep", "scan", "--config", "auto", "--json", "--quiet"]
+            MAXARG = 4000  # evite argv trop long: on scanne par gros paquets
+            try:
+                if total <= MAXARG:
+                    proc = subprocess.run(cmd + targets, capture_output=True,
+                                          text=True, timeout=1800)
+                    data0 = _safe_json(proc.stdout)
+                    parse_results(data0, results, counts)
+                    combined = {"results": data0.get("results", [])}
+                else:
+                    combined = {"results": []}
+                    for i in range(0, total, MAXARG):
+                        proc = subprocess.run(cmd + targets[i:i+MAXARG],
+                                              capture_output=True, text=True, timeout=1800)
+                        d0 = _safe_json(proc.stdout)
+                        parse_results(d0, results, counts)
+            finally:
+                stop.set()
+                tk.join(timeout=1)
+            # resultats deja parses dans la boucle ci-dessus
+            q.put(("progress", {"pct": 100, "phase": "Termine", "total": total,
+                                "counts": dict(counts), "new": []}))
         order = {"ERROR": 0, "WARNING": 1, "INFO": 2}
         results.sort(key=lambda x: order[x["severity"]])
         job["result"] = {"results": results, "counts": counts, "error": None}
@@ -134,117 +165,131 @@ PAGE = r"""
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>STV &middot; Semgrep Scanner</title>
 <style>
- :root{color-scheme:light dark}
- @media (prefers-color-scheme: dark){:root{
-   --bg:#0a0c10;--panel:#0f131a;--card:#161b22;--bd:#232a35;--bd2:#2f3846;
-   --tx:#e6edf3;--mut:#8b949e;--in:#0b0e13;--glow:rgba(47,129,247,.15)}}
+ /* ---- Palette Zed (One Dark) ---- */
+ :root{color-scheme:dark}
+ :root{
+   --editor:#282c33;   /* zone contenu, la plus sombre */
+   --panel:#2f343e;    /* sidebar, barre onglets */
+   --titlebar:#3b414d; /* barre de titre */
+   --bd:#464b57; --bd2:#363c46;
+   --tx:#dce0e5; --mut:#a9afbc; --ph:#878a98;
+   --acc:#74ade8; --hi:#d07277; --med:#dec184; --lo:#a1c181;
+   --r:4px; --r6:6px;
+   --fui:"Zed Plex Sans","IBM Plex Sans",-apple-system,"Segoe UI",system-ui,sans-serif;
+   --fmono:"Zed Plex Mono","Lilex","IBM Plex Mono",ui-monospace,Consolas,monospace;
+ }
  @media (prefers-color-scheme: light){:root{
-   --bg:#f0f2f5;--panel:#fff;--card:#fff;--bd:#e1e4e8;--bd2:#d0d7de;
-   --tx:#1f2328;--mut:#656d76;--in:#f6f8fa;--glow:rgba(47,129,247,.1)}}
- :root{--hi:#f85149;--med:#d29922;--lo:#3fb950;--acc:#2f81f7;--acc2:#58a6ff}
+   --editor:#fafafa;--panel:#ececec;--titlebar:#e0e0e0;--bd:#d3d3d3;--bd2:#e0e0e0;
+   --tx:#242529;--mut:#5a5c63;--ph:#9295a0;--acc:#5c78e2;
+   --hi:#c04a4a;--med:#b08500;--lo:#5a9e3a}}
  *{box-sizing:border-box}
  html,body{height:100%}
- body{margin:0;background:var(--bg);color:var(--tx);
-   font:14px/1.55 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;
-   display:grid;grid-template-rows:auto 1fr;height:100vh;overflow:hidden}
- /* topbar */
- .top{display:flex;align-items:center;gap:12px;padding:14px 22px;
-   background:var(--panel);border-bottom:1px solid var(--bd)}
- .logo{font-size:18px;font-weight:700;letter-spacing:-.3px;display:flex;align-items:center;gap:9px}
- .logo .dot{width:10px;height:10px;border-radius:50%;background:var(--acc);
-   box-shadow:0 0 10px var(--acc)}
- .top .sub{color:var(--mut);font-size:12.5px}
+ body{margin:0;background:var(--editor);color:var(--tx);
+   font:13px/1.5 var(--fui);
+   display:flex;flex-direction:column;height:100vh;overflow:hidden}
+ /* titlebar */
+ .top{display:flex;align-items:center;gap:10px;padding:8px 14px;flex:0 0 auto;
+   background:var(--titlebar);border-bottom:1px solid var(--bd2);height:36px}
+ .logo{font-size:13px;font-weight:600;letter-spacing:.2px;display:flex;align-items:center;gap:7px}
+ .logo .dot{width:7px;height:7px;border-radius:50%;background:var(--acc)}
+ .top .sub{color:var(--mut);font-size:12px}
  .top .spacer{flex:1}
- .badge{font-size:11.5px;color:var(--mut);border:1px solid var(--bd);border-radius:20px;
-   padding:4px 11px}
+ .badge{font-size:11px;color:var(--mut);border:1px solid var(--bd);border-radius:var(--r);
+   padding:2px 8px}
  /* layout */
- .app{display:grid;grid-template-columns:340px 1fr;height:100%;overflow:hidden}
- .side{background:var(--panel);border-right:1px solid var(--bd);padding:22px;
-   overflow-y:auto;display:flex;flex-direction:column;gap:20px}
- .main{overflow-y:auto;padding:24px 30px}
- .main .inner{max-width:1400px;margin:0 auto}
+ .app{display:grid;grid-template-columns:280px 1fr;flex:1;min-height:0;overflow:hidden}
+ .side{background:var(--panel);border-right:1px solid var(--bd2);padding:14px;
+   overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+ .main{overflow-y:auto;padding:16px 20px;background:var(--editor)}
+ .main .inner{max-width:1300px;margin:0 auto}
  /* form */
- label{font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;
-   letter-spacing:.6px;display:block;margin-bottom:8px}
- .field{display:flex;flex-direction:column;gap:10px}
- input[type=text]{background:var(--in);border:1px solid var(--bd2);color:var(--tx);
-   padding:12px 14px;border-radius:10px;font:inherit;width:100%;transition:border .15s,box-shadow .15s}
- input[type=text]:focus{outline:0;border-color:var(--acc);box-shadow:0 0 0 3px var(--glow)}
- button{background:var(--acc);color:#fff;border:0;padding:12px 18px;border-radius:10px;
-   font:inherit;font-weight:600;cursor:pointer;width:100%;transition:filter .15s}
- button:hover:not(:disabled){filter:brightness(1.1)}
+ label{font-size:11px;font-weight:500;color:var(--mut);
+   display:block;margin-bottom:6px}
+ .field{display:flex;flex-direction:column;gap:8px}
+ input[type=text]{background:var(--editor);border:1px solid var(--bd);color:var(--tx);
+   padding:7px 9px;border-radius:var(--r);font:13px var(--fmono);width:100%;transition:border .12s}
+ input[type=text]::placeholder{color:var(--ph)}
+ input[type=text]:focus{outline:0;border-color:var(--acc)}
+ button{background:var(--acc);color:#1a1d23;border:0;padding:7px 12px;border-radius:var(--r);
+   font:13px/1 var(--fui);font-weight:500;cursor:pointer;width:100%;transition:filter .12s}
+ button:hover:not(:disabled){filter:brightness(1.08)}
  button:disabled{opacity:.5;cursor:default}
- .hint{font-size:12px;color:var(--mut)}
+ .hint{font-size:11px;color:var(--ph);line-height:1.4}
  /* progress */
- .prog{display:none;flex-direction:column;gap:10px;background:var(--card);
-   border:1px solid var(--bd);border-radius:14px;padding:16px}
+ .prog{display:none;flex-direction:column;gap:8px;background:var(--editor);
+   border:1px solid var(--bd2);border-radius:var(--r6);padding:12px}
  .prog.on{display:flex}
  .phead{display:flex;justify-content:space-between;align-items:baseline}
- .phead .pct{font-size:24px;font-weight:700;font-variant-numeric:tabular-nums}
- .phead .lbl{font-size:12px;color:var(--mut)}
- .bar{height:8px;background:var(--in);border-radius:99px;overflow:hidden}
+ .phead .pct{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;font-family:var(--fmono)}
+ .phead .lbl{font-size:11px;color:var(--mut)}
+ .bar{height:5px;background:var(--panel);border-radius:99px;overflow:hidden}
  .bar>i{display:block;height:100%;width:0;border-radius:99px;
-   background:linear-gradient(90deg,var(--acc),var(--acc2));transition:width .3s ease}
- #log{font:11.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--mut);
-   max-height:120px;overflow:auto;white-space:pre-wrap;
-   background:var(--in);border-radius:8px;padding:8px 10px}
- #log:empty{display:none}
- #log div{padding:.5px 0}
+   background:var(--acc);transition:width .4s ease}
+ .log{font:11px/1.45 var(--fmono);color:var(--ph);
+   max-height:100px;overflow:auto;white-space:pre-wrap;
+   background:var(--panel);border-radius:var(--r);padding:6px 8px}
+ .log:empty{display:none}
+ .log div{padding:.5px 0}
  /* stat cards */
- .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:22px}
- .stat{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px 18px}
- .stat .n{font-size:30px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums}
- .stat .k{font-size:12px;color:var(--mut);margin-top:6px;text-transform:uppercase;letter-spacing:.5px}
- .stat.c-hi{border-top:3px solid var(--hi)} .stat.c-hi .n{color:var(--hi)}
- .stat.c-med{border-top:3px solid var(--med)} .stat.c-med .n{color:var(--med)}
- .stat.c-lo{border-top:3px solid var(--lo)} .stat.c-lo .n{color:var(--lo)}
- .stat.c-all{border-top:3px solid var(--acc)}
+ .stats-wrap{margin-bottom:16px}
+ .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+ .stat{background:var(--panel);border:1px solid var(--bd2);border-radius:var(--r6);padding:12px 14px}
+ .stat .n{font-size:24px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums;font-family:var(--fmono)}
+ .stat .k{font-size:11px;color:var(--mut);margin-top:5px}
+ .stat.c-hi .n{color:var(--hi)}
+ .stat.c-med .n{color:var(--med)}
+ .stat.c-lo .n{color:var(--lo)}
+ .stat.c-all .n{color:var(--acc)}
  /* findings */
- .f{background:var(--card);border:1px solid var(--bd);border-left-width:4px;
-   border-radius:12px;padding:14px 16px;margin-bottom:12px;
-   animation:pop .25s ease}
- @keyframes pop{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+ .f{background:var(--panel);border:1px solid var(--bd2);border-left:2px solid var(--bd);
+   border-radius:var(--r);padding:10px 12px;margin-bottom:6px}
  .f.ERROR{border-left-color:var(--hi)}.f.WARNING{border-left-color:var(--med)}
  .f.INFO{border-left-color:var(--lo)}
- .frow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
- .sev{font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
-   padding:3px 9px;border-radius:6px}
- .ERROR .sev{color:var(--hi);background:rgba(248,81,73,.12)}
- .WARNING .sev{color:var(--med);background:rgba(210,153,34,.12)}
- .INFO .sev{color:var(--lo);background:rgba(63,185,80,.12)}
- .loc{color:var(--tx);font-size:13px;font-family:ui-monospace,monospace}
- .loc .ln{color:var(--acc2)}
- .msg{margin:8px 0 0;color:var(--tx)}
- .rid{color:var(--mut);font-size:11.5px;margin-top:6px;font-family:ui-monospace,monospace}
- pre{background:var(--in);border:1px solid var(--bd);border-radius:8px;padding:10px 12px;
-   overflow:auto;font:12px/1.5 ui-monospace,monospace;margin:10px 0 0}
- .err{color:var(--hi);background:rgba(248,81,73,.1);border:1px solid var(--hi);
-   border-radius:12px;padding:14px 16px;margin-bottom:16px}
- .empty{color:var(--mut);padding:60px 20px;text-align:center;font-size:15px}
- .empty .big{font-size:48px;margin-bottom:12px}
- .welcome{color:var(--mut);padding:80px 20px;text-align:center}
- .welcome .big{font-size:56px;margin-bottom:16px;opacity:.5}
- .welcome h2{color:var(--tx);font-weight:600;margin:0 0 8px}
+ .frow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+ .sev{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;
+   padding:2px 6px;border-radius:var(--r)}
+ .ERROR .sev{color:var(--hi);background:rgba(208,114,119,.14)}
+ .WARNING .sev{color:var(--med);background:rgba(222,193,132,.14)}
+ .INFO .sev{color:var(--lo);background:rgba(161,193,129,.14)}
+ .loc{color:var(--tx);font-size:12px;font-family:var(--fmono)}
+ .loc .ln{color:var(--acc)}
+ .msg{margin:6px 0 0;color:var(--tx);font-size:12.5px}
+ .rid{color:var(--ph);font-size:11px;margin-top:5px;font-family:var(--fmono)}
+ pre{background:var(--editor);border:1px solid var(--bd2);border-radius:var(--r);padding:8px 10px;
+   overflow:auto;font:11.5px/1.5 var(--fmono);margin:8px 0 0}
+ .err{color:var(--hi);background:rgba(208,114,119,.1);border:1px solid var(--hi);
+   border-radius:var(--r);padding:10px 12px;margin-bottom:12px;font-size:12.5px}
+ .toolbar{display:flex;justify-content:flex-end;margin-bottom:10px}
+ .copybtn{width:auto;background:var(--panel);color:var(--tx);border:1px solid var(--bd);
+   padding:5px 12px;font-size:12px;font-weight:500}
+ .copybtn:hover:not(:disabled){filter:none;background:var(--bd2);border-color:var(--acc)}
+ .empty{color:var(--mut);padding:50px 20px;text-align:center;font-size:13px}
+ .empty .big{font-size:38px;margin-bottom:10px}
+ .welcome{color:var(--mut);padding:70px 20px;text-align:center}
+ .welcome .big{font-size:44px;margin-bottom:12px;opacity:.4}
+ .welcome h2{color:var(--tx);font-weight:600;margin:0 0 6px;font-size:16px}
+ .welcome div{font-size:12.5px;line-height:1.6}
  @media(max-width:820px){.app{grid-template-columns:1fr}
-   .side{border-right:0;border-bottom:1px solid var(--bd)}
+   .side{border-right:0;border-bottom:1px solid var(--bd2)}
    .stats{grid-template-columns:repeat(2,1fr)}}
- /* onglets */
- .tabs{display:flex;align-items:center;gap:4px;padding:0 14px;background:var(--panel);
-   border-bottom:1px solid var(--bd);overflow-x:auto}
- .tab{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;
-   border-bottom:2px solid transparent;color:var(--mut);font-size:13px;white-space:nowrap;
-   max-width:240px}
+ /* onglets style Zed */
+ .tabs{display:flex;align-items:stretch;background:var(--panel);flex:0 0 auto;
+   border-bottom:1px solid var(--bd2);overflow-x:auto;min-height:32px}
+ .tabs:empty{display:none}
+ .tab{display:flex;align-items:center;gap:7px;padding:0 12px;cursor:pointer;
+   color:var(--mut);font-size:12px;white-space:nowrap;max-width:220px;
+   background:var(--panel);border-right:1px solid var(--bd2)}
  .tab:hover{color:var(--tx)}
- .tab.active{color:var(--tx);border-bottom-color:var(--acc)}
+ .tab.active{color:var(--tx);background:var(--editor)}
  .tab .tname{overflow:hidden;text-overflow:ellipsis}
- .tab .tdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
- .tab .tdot.run{background:var(--acc);animation:pulse 1s infinite}
+ .tab .tdot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+ .tab .tdot.run{background:var(--acc);animation:pulse 1.1s infinite}
  .tab .tdot.done{background:var(--lo)}
  .tab .tdot.err{background:var(--hi)}
  @keyframes pulse{50%{opacity:.3}}
- .tab .x{opacity:.5;font-size:15px;line-height:1;padding:0 2px;border-radius:4px}
+ .tab .x{opacity:0;font-size:14px;line-height:1;padding:1px 3px;border-radius:var(--r);color:var(--ph)}
+ .tab:hover .x{opacity:.7}
  .tab .x:hover{opacity:1;background:var(--bd)}
- .tab.newtab{color:var(--acc);font-weight:600}
  .view{display:none}.view.active{display:block}
 </style></head><body>
 <div class="top">
@@ -290,13 +335,19 @@ function statCards(c){const n=c.ERROR+c.WARNING+c.INFO;return '<div class="stats
    '<div class="stat c-med"><div class="n">'+c.WARNING+'</div><div class="k">Moyens</div></div>'+
    '<div class="stat c-lo"><div class="n">'+c.INFO+'</div><div class="k">Infos</div></div></div>';}
 
+function tabLabel(t){
+ // pendant le scan: "nom 42%", fini: "nom (n)", erreur: "nom"
+ if(t.status==='run') return t.name+' '+(t.pct||0)+'%';
+ if(t.status==='done') return t.name+' ('+(t.count||0)+')';
+ return t.name;
+}
 function renderTabs(){
  tabsEl.innerHTML='';
  for(const t of TABS){
    const el=document.createElement('div');
    el.className='tab'+(t.id===active?' active':'');
    el.innerHTML='<span class="tdot '+t.status+'"></span>'+
-     '<span class="tname">'+esc(t.name)+'</span><span class="x">&times;</span>';
+     '<span class="tname">'+esc(tabLabel(t))+'</span><span class="x">&times;</span>';
    el.querySelector('.tname').onclick=()=>select(t.id);
    el.querySelector('.tdot').onclick=()=>select(t.id);
    el.querySelector('.x').onclick=e=>{e.stopPropagation();closeTab(t.id);};
@@ -329,9 +380,20 @@ function newView(name){
  return v;
 }
 
+function norm(p){return p.replace(/[\\/]+$/,'').replace(/\\/g,'/').toLowerCase();}
+
 frm.addEventListener('submit',async e=>{
  e.preventDefault();
  const path=$('path').value.trim(); if(!path)return;
+ // blocage doublon: si un scan de ce dossier existe deja (en cours ou fini), focus son onglet
+ const dup=TABS.find(t=>norm(t.path)===norm(path));
+ if(dup){
+   select(dup.id);
+   if(dup.status!=='run'){
+     if(!confirm('Ce dossier a deja un onglet. Relancer le scan ?')){ $('path').value=''; return; }
+     closeTab(dup.id);
+   } else { $('path').value=''; return; }  // deja en cours -> juste focus
+ }
  welcome.style.display='none';
  let r;
  try{ r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -339,7 +401,7 @@ frm.addEventListener('submit',async e=>{
  const data=await r.json();
  const id=++seq;
  const view=newView(base(path));
- const tab={id,name:base(path),path,status:'run',view,es:null};
+ const tab={id,name:base(path),path,status:'run',pct:0,count:0,view,es:null};
  TABS.push(tab); select(id);
  if(!r.ok){ tab.status='err'; renderTabs();
    view.querySelector('.prog').classList.remove('on');
@@ -363,24 +425,47 @@ function wire(tab, scan_id){
  es.addEventListener('progress',ev=>{
    const p=JSON.parse(ev.data);
    pbar.style.width=p.pct+'%'; pct.textContent=p.pct+'%';
-   lbl.textContent=p.done+' / '+p.total+' fichiers';
+   lbl.textContent=(p.phase||'')+(p.total?' · '+p.total+' fichiers':'');
+   tab.pct=p.pct; renderTabs();  // % dans l'onglet
    statsW.innerHTML=statCards(p.counts);
-   if(p.new&&p.new.length) for(const r of p.new) live.insertAdjacentHTML('beforeend',fcard(r));
  });
  es.addEventListener('done',ev=>{
    es.close(); const d=JSON.parse(ev.data);
-   prog.classList.remove('on'); live.innerHTML='';
+   prog.classList.remove('on');
    if(d.error){ tab.status='err'; renderTabs();
      errEl.textContent='Erreur: '+d.error; errEl.style.display='block'; return; }
    statsW.innerHTML=statCards(d.counts);
    const n=d.results.length;
-   tab.status='done'; tab.name=base(tab.path)+' ('+n+')'; renderTabs();
+   tab.status='done'; tab.count=n; renderTabs();
+   tab.results=d.results;
    let h='';
-   if(!n) h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>';
-   for(const r of d.results) h+=fcard(r);
+   if(!n){ h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>'; }
+   else{
+     h='<div class="toolbar"><button type="button" class="copybtn">Copier les '+n+' problemes</button></div>';
+     for(const r of d.results) h+=fcard(r);
+   }
    out.innerHTML=h;
+   const cb=out.querySelector('.copybtn');
+   if(cb) cb.onclick=()=>copyResults(tab, cb);
  });
  es.onerror=()=>{ es.close(); };
+}
+
+function copyResults(tab, btn){
+ const rs=tab.results||[];
+ const lines=rs.map(r=>'['+r.severity+'] '+r.file+':'+r.line+'\n  '+r.message+
+   '\n  ('+r.check_id+')').join('\n\n');
+ const txt='STV scan · '+tab.path+'\n'+rs.length+' problemes\n\n'+lines;
+ const done=()=>{ const o=btn.textContent; btn.textContent='Copie !';
+   setTimeout(()=>btn.textContent=o,1500); };
+ if(navigator.clipboard&&navigator.clipboard.writeText){
+   navigator.clipboard.writeText(txt).then(done).catch(()=>fallbackCopy(txt,done));
+ } else fallbackCopy(txt,done);
+}
+function fallbackCopy(txt,done){
+ const ta=document.createElement('textarea'); ta.value=txt;
+ ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);
+ ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); done();
 }
 </script></body></html>
 """
