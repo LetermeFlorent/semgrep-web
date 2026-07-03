@@ -228,6 +228,24 @@ PAGE = r"""
  @media(max-width:820px){.app{grid-template-columns:1fr}
    .side{border-right:0;border-bottom:1px solid var(--bd)}
    .stats{grid-template-columns:repeat(2,1fr)}}
+ /* onglets */
+ .tabs{display:flex;align-items:center;gap:4px;padding:0 14px;background:var(--panel);
+   border-bottom:1px solid var(--bd);overflow-x:auto}
+ .tab{display:flex;align-items:center;gap:8px;padding:10px 14px;cursor:pointer;
+   border-bottom:2px solid transparent;color:var(--mut);font-size:13px;white-space:nowrap;
+   max-width:240px}
+ .tab:hover{color:var(--tx)}
+ .tab.active{color:var(--tx);border-bottom-color:var(--acc)}
+ .tab .tname{overflow:hidden;text-overflow:ellipsis}
+ .tab .tdot{width:8px;height:8px;border-radius:50%;flex:0 0 auto}
+ .tab .tdot.run{background:var(--acc);animation:pulse 1s infinite}
+ .tab .tdot.done{background:var(--lo)}
+ .tab .tdot.err{background:var(--hi)}
+ @keyframes pulse{50%{opacity:.3}}
+ .tab .x{opacity:.5;font-size:15px;line-height:1;padding:0 2px;border-radius:4px}
+ .tab .x:hover{opacity:1;background:var(--bd)}
+ .tab.newtab{color:var(--acc);font-weight:600}
+ .view{display:none}.view.active{display:block}
 </style></head><body>
 <div class="top">
   <div class="logo"><span class="dot"></span>STV</div>
@@ -235,6 +253,7 @@ PAGE = r"""
   <div class="spacer"></div>
   <span class="badge">F:\ &middot; W:\ montes (lecture seule)</span>
 </div>
+<div class="tabs" id="tabs"></div>
 <div class="app">
   <aside class="side">
     <form id="frm" class="field">
@@ -242,85 +261,126 @@ PAGE = r"""
         <label for="path">Dossier a scanner</label>
         <input type="text" id="path" placeholder="F:\monprojet" required autofocus>
       </div>
-      <button type="submit" id="btn">Lancer le scan</button>
-      <div class="hint">Ignore node_modules, .git, venv, build&hellip;</div>
+      <button type="submit" id="btn">Lancer un nouveau scan</button>
+      <div class="hint">Chaque scan ouvre un onglet. Ignore node_modules, .git, venv&hellip;</div>
     </form>
-    <div class="prog" id="prog">
-      <div class="phead"><span class="pct" id="ppct">0%</span>
-        <span class="lbl" id="pfiles">Preparation&hellip;</span></div>
-      <div class="bar"><i id="pbar"></i></div>
-      <div id="log"></div>
-    </div>
   </aside>
-  <main class="main"><div class="inner">
-    <div id="err" class="err" style="display:none"></div>
-    <div id="stats"></div>
-    <div id="live"></div>
-    <div id="out"></div>
+  <main class="main"><div class="inner" id="views">
     <div id="welcome" class="welcome"><div class="big">&#128737;</div>
-      <h2>Pret a scanner</h2><div>Entre un chemin de dossier et lance le scan.</div></div>
-  </main></div>
+      <h2>Pret a scanner</h2><div>Entre un chemin de dossier et lance le scan.<br>
+      Tu peux lancer plusieurs scans en parallele &mdash; chacun a son onglet.</div></div>
+  </div></main>
 </div>
 <script>
 const $=id=>document.getElementById(id);
-const frm=$('frm'),btn=$('btn'),prog=$('prog'),logEl=$('log'),out=$('out'),
- errEl=$('err'),pbar=$('pbar'),ppct=$('ppct'),pfiles=$('pfiles'),live=$('live'),
- statsEl=$('stats'),welcome=$('welcome');
+const frm=$('frm'),tabsEl=$('tabs'),viewsEl=$('views'),welcome=$('welcome');
+let TABS=[], active=null, seq=0;
 
 function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function base(p){const s=p.replace(/[\\/]+$/,'').split(/[\\/]/);return s[s.length-1]||p;}
 function fcard(r){return '<div class="f '+r.severity+'">'+
    '<div class="frow"><span class="sev">'+r.severity+'</span>'+
    '<span class="loc">'+esc(r.file)+':<span class="ln">'+r.line+'</span></span></div>'+
    '<div class="msg">'+esc(r.message)+'</div>'+
    '<div class="rid">'+esc(r.check_id)+'</div>'+
    (r.code?'<pre>'+esc(r.code)+'</pre>':'')+'</div>';}
-function statCards(c,n){return '<div class="stats">'+
+function statCards(c){const n=c.ERROR+c.WARNING+c.INFO;return '<div class="stats">'+
    '<div class="stat c-all"><div class="n">'+n+'</div><div class="k">Total</div></div>'+
    '<div class="stat c-hi"><div class="n">'+c.ERROR+'</div><div class="k">Critiques</div></div>'+
    '<div class="stat c-med"><div class="n">'+c.WARNING+'</div><div class="k">Moyens</div></div>'+
    '<div class="stat c-lo"><div class="n">'+c.INFO+'</div><div class="k">Infos</div></div></div>';}
 
+function renderTabs(){
+ tabsEl.innerHTML='';
+ for(const t of TABS){
+   const el=document.createElement('div');
+   el.className='tab'+(t.id===active?' active':'');
+   el.innerHTML='<span class="tdot '+t.status+'"></span>'+
+     '<span class="tname">'+esc(t.name)+'</span><span class="x">&times;</span>';
+   el.querySelector('.tname').onclick=()=>select(t.id);
+   el.querySelector('.tdot').onclick=()=>select(t.id);
+   el.querySelector('.x').onclick=e=>{e.stopPropagation();closeTab(t.id);};
+   tabsEl.appendChild(el);
+ }
+}
+function select(id){active=id;
+ for(const t of TABS) t.view.classList.toggle('active',t.id===id);
+ renderTabs();
+}
+function closeTab(id){
+ const t=TABS.find(x=>x.id===id); if(!t)return;
+ if(t.es) t.es.close(); t.view.remove();
+ TABS=TABS.filter(x=>x.id!==id);
+ if(active===id) active=TABS.length?TABS[TABS.length-1].id:null;
+ if(active) select(active);
+ renderTabs();
+ if(!TABS.length) welcome.style.display='';
+}
+
+function newView(name){
+ const v=document.createElement('div'); v.className='view';
+ v.innerHTML=
+  '<div class="prog on"><div class="phead"><span class="pct">0%</span>'+
+   '<span class="lbl">Preparation&hellip;</span></div>'+
+   '<div class="bar"><i></i></div><div class="log"></div></div>'+
+  '<div class="err" style="display:none"></div>'+
+  '<div class="stats-wrap"></div><div class="live"></div><div class="out"></div>';
+ viewsEl.appendChild(v);
+ return v;
+}
+
 frm.addEventListener('submit',async e=>{
  e.preventDefault();
  const path=$('path').value.trim(); if(!path)return;
- btn.disabled=true; welcome.style.display='none';
- out.innerHTML=''; errEl.style.display='none'; logEl.innerHTML='';
- live.innerHTML=''; statsEl.innerHTML='';
- pbar.style.width='0'; ppct.textContent='0%'; pfiles.textContent='Preparation…';
- prog.classList.add('on');
+ welcome.style.display='none';
  let r;
  try{ r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({path})}); }catch(x){ fail(x); return; }
- if(!r.ok){ const d=await r.json(); fail(d.error||'erreur'); return; }
- const {scan_id}=await r.json();
- const es=new EventSource('/stream/'+scan_id);
+   body:JSON.stringify({path})}); }catch(x){ alert('Erreur reseau'); return; }
+ const data=await r.json();
+ const id=++seq;
+ const view=newView(base(path));
+ const tab={id,name:base(path),path,status:'run',view,es:null};
+ TABS.push(tab); select(id);
+ if(!r.ok){ tab.status='err'; renderTabs();
+   view.querySelector('.prog').classList.remove('on');
+   const ev=view.querySelector('.err'); ev.textContent='Erreur: '+(data.error||'?');
+   ev.style.display='block'; return; }
+ $('path').value='';
+ wire(tab, data.scan_id);
+});
+
+function wire(tab, scan_id){
+ const v=tab.view, prog=v.querySelector('.prog'),
+  pbar=v.querySelector('.bar>i'), pct=v.querySelector('.pct'),
+  lbl=v.querySelector('.lbl'), logEl=v.querySelector('.log'),
+  statsW=v.querySelector('.stats-wrap'), live=v.querySelector('.live'),
+  out=v.querySelector('.out'), errEl=v.querySelector('.err');
+ const es=new EventSource('/stream/'+scan_id); tab.es=es;
  es.addEventListener('log',ev=>{
    const d=document.createElement('div'); d.textContent=JSON.parse(ev.data);
    logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
  });
  es.addEventListener('progress',ev=>{
    const p=JSON.parse(ev.data);
-   pbar.style.width=p.pct+'%'; ppct.textContent=p.pct+'%';
-   pfiles.textContent=p.done+' / '+p.total+' fichiers';
-   statsEl.innerHTML=statCards(p.counts, p.counts.ERROR+p.counts.WARNING+p.counts.INFO);
-   if(p.new && p.new.length) for(const r of p.new) live.insertAdjacentHTML('beforeend', fcard(r));
+   pbar.style.width=p.pct+'%'; pct.textContent=p.pct+'%';
+   lbl.textContent=p.done+' / '+p.total+' fichiers';
+   statsW.innerHTML=statCards(p.counts);
+   if(p.new&&p.new.length) for(const r of p.new) live.insertAdjacentHTML('beforeend',fcard(r));
  });
- es.addEventListener('done',ev=>{ es.close(); render(JSON.parse(ev.data)); });
+ es.addEventListener('done',ev=>{
+   es.close(); const d=JSON.parse(ev.data);
+   prog.classList.remove('on'); live.innerHTML='';
+   if(d.error){ tab.status='err'; renderTabs();
+     errEl.textContent='Erreur: '+d.error; errEl.style.display='block'; return; }
+   statsW.innerHTML=statCards(d.counts);
+   const n=d.results.length;
+   tab.status='done'; tab.name=base(tab.path)+' ('+n+')'; renderTabs();
+   let h='';
+   if(!n) h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>';
+   for(const r of d.results) h+=fcard(r);
+   out.innerHTML=h;
+ });
  es.onerror=()=>{ es.close(); };
-});
-
-function fail(msg){ prog.classList.remove('on'); btn.disabled=false;
- errEl.textContent='Erreur: '+msg; errEl.style.display='block'; }
-
-function render(d){
- prog.classList.remove('on'); btn.disabled=false; live.innerHTML='';
- if(d.error){ errEl.textContent='Erreur: '+d.error; errEl.style.display='block'; return; }
- const c=d.counts, n=d.results.length;
- statsEl.innerHTML=statCards(c,n);
- let h='';
- if(!n){ h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>'; }
- for(const r of d.results){ h+=fcard(r); }
- out.innerHTML=h;
 }
 </script></body></html>
 """
