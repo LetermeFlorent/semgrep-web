@@ -32,6 +32,9 @@ def list_targets(root):
                 files.append(os.path.join(dp, fn))
     return files
 
+class Cancelled(Exception):
+    pass
+
 def _safe_json(s):
     try:
         return json.loads(s or "{}")
@@ -58,84 +61,153 @@ def parse_results(data, results, counts):
         new.append(item)
     return new
 
-def run_scan(scan_id, target):
-    job = JOBS[scan_id]
-    q = job["q"]
+# Persistance des jobs sur disque (survit au redemarrage du conteneur).
+STATE_FILE = os.environ.get("STV_STATE", "/state/jobs.json")
+JLOCK = threading.Lock()
+JCOND = threading.Condition(JLOCK)  # notifie les streams a chaque update
+
+def snapshot(job):
+    # etat serialisable expose au client
+    return {
+        "scan_id": job["scan_id"], "path": job["path"], "status": job["status"],
+        "pct": job["pct"], "phase": job["phase"], "total": job["total"],
+        "counts": job["counts"], "version": job["version"],
+        "results": job["results"] if job["status"] == "done" else None,
+        "error": job.get("error"),
+    }
+
+def persist():
+    # sauve un resume leger (sans les resultats volumineux) pour reprise.
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        with JLOCK:
+            data = {sid: {"scan_id": j["scan_id"], "path": j["path"],
+                          "status": j["status"]} for sid, j in JOBS.items()}
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, STATE_FILE)
+    except Exception:
+        pass
+
+def touch(job, **kw):
+    # met a jour l'etat + incremente version + reveille les streams
+    with JCOND:
+        job.update(kw)
+        job["version"] += 1
+        JCOND.notify_all()
+
+def run_scan(job, target):
     results, counts = [], {"ERROR": 0, "WARNING": 0, "INFO": 0}
     try:
-        q.put(("log", "Recensement des fichiers..."))
+        touch(job, phase="Recensement des fichiers", pct=1)
         targets = list_targets(target)
         total = len(targets)
+        touch(job, total=total)
         if total == 0:
-            q.put(("log", "Aucun fichier de code trouve."))
-            q.put(("progress", {"pct": 100, "phase": "Termine", "total": 0,
-                                 "counts": counts, "new": []}))
+            touch(job, pct=100, phase="Termine")
         else:
-            q.put(("log", f"{total} fichiers a scanner."))
-            q.put(("progress", {"pct": 2, "phase": "Chargement des regles",
-                                "total": total, "counts": dict(counts), "new": []}))
-            # Estimation de duree: cout fixe (chargement regles) + par fichier.
+            touch(job, pct=2, phase="Chargement des regles")
             est = 7.0 + total * 0.25
             stop = threading.Event()
 
             def ticker():
-                # fait avancer la barre jusqu'a 95% selon le temps ecoule / estimation
                 t0 = time.monotonic()
                 while not stop.wait(0.5):
                     el = time.monotonic() - t0
                     pct = min(95, round(2 + (el / est) * 93))
                     phase = "Analyse en cours" if el > 4 else "Chargement des regles"
-                    q.put(("progress", {"pct": pct, "phase": phase, "total": total,
-                                        "counts": dict(counts), "new": []}))
+                    touch(job, pct=pct, phase=phase, counts=dict(counts))
 
             tk = threading.Thread(target=ticker, daemon=True)
             tk.start()
-            # On passe la liste de fichiers deja filtree (pas le dossier) pour que
-            # semgrep ne parcoure PAS target/, node_modules/ (peut etre enorme).
             cmd = ["semgrep", "scan", "--config", "auto", "--json", "--quiet"]
-            MAXARG = 4000  # evite argv trop long: on scanne par gros paquets
+            MAXARG = 4000
             try:
-                if total <= MAXARG:
-                    proc = subprocess.run(cmd + targets, capture_output=True,
-                                          text=True, timeout=1800)
-                    data0 = _safe_json(proc.stdout)
-                    parse_results(data0, results, counts)
-                    combined = {"results": data0.get("results", [])}
-                else:
-                    combined = {"results": []}
-                    for i in range(0, total, MAXARG):
-                        proc = subprocess.run(cmd + targets[i:i+MAXARG],
-                                              capture_output=True, text=True, timeout=1800)
-                        d0 = _safe_json(proc.stdout)
-                        parse_results(d0, results, counts)
+                for i in range(0, total, MAXARG):
+                    if job.get("cancel"):
+                        raise Cancelled()
+                    proc = subprocess.Popen(cmd + targets[i:i+MAXARG],
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                            text=True)
+                    job["proc"] = proc
+                    out, _ = proc.communicate(timeout=1800)
+                    if job.get("cancel"):
+                        raise Cancelled()
+                    parse_results(_safe_json(out), results, counts)
             finally:
                 stop.set()
                 tk.join(timeout=1)
-            # resultats deja parses dans la boucle ci-dessus
-            q.put(("progress", {"pct": 100, "phase": "Termine", "total": total,
-                                "counts": dict(counts), "new": []}))
+                job["proc"] = None
         order = {"ERROR": 0, "WARNING": 1, "INFO": 2}
         results.sort(key=lambda x: order[x["severity"]])
-        job["result"] = {"results": results, "counts": counts, "error": None}
+        touch(job, pct=100, phase="Termine", status="done",
+              counts=counts, results=results)
+    except Cancelled:
+        touch(job, status="cancelled", phase="Annule")
     except Exception as e:
-        job["result"] = {"results": results, "counts": counts, "error": str(e)}
-    q.put(("done", None))
-    job["done"] = True
+        touch(job, status="err", error=str(e), results=results, counts=counts)
+    persist()
+
+def new_job(path, target):
+    scan_id = uuid.uuid4().hex
+    job = {"scan_id": scan_id, "path": path, "status": "run", "pct": 0,
+           "phase": "Preparation", "total": 0,
+           "counts": {"ERROR": 0, "WARNING": 0, "INFO": 0},
+           "results": [], "error": None, "version": 0}
+    with JLOCK:
+        JOBS[scan_id] = job
+    persist()
+    threading.Thread(target=run_scan, args=(job, target), daemon=True).start()
+    return job
+
+def resume_jobs():
+    # au demarrage: relance les scans qui etaient "run" (process mort au restart).
+    try:
+        with open(STATE_FILE) as f:
+            saved = json.load(f)
+    except Exception:
+        return
+    for sid, s in saved.items():
+        if s.get("status") == "run":
+            target = map_path(s["path"])
+            if os.path.isdir(target):
+                new_job(s["path"], target)
 
 @app.route("/")
 def index():
     return render_template_string(PAGE)
+
+@app.route("/jobs")
+def jobs():
+    # snapshot de tous les jobs connus (pour reconstruire les onglets au reload)
+    with JLOCK:
+        return jsonify([snapshot(j) for j in JOBS.values()])
 
 @app.route("/start", methods=["POST"])
 def start():
     path = (request.json.get("path") or "").strip()
     target = map_path(path)
     if not os.path.isdir(target):
-        return jsonify({"error": "Dossier introuvable: " + path + " (disques montes: F:\\ et W:\\)"}), 400
-    scan_id = uuid.uuid4().hex
-    JOBS[scan_id] = {"q": queue.Queue(), "done": False, "result": None}
-    threading.Thread(target=run_scan, args=(scan_id, target), daemon=True).start()
-    return jsonify({"scan_id": scan_id})
+        return jsonify({"error": "Dossier introuvable: " + path + " (disques montes: C D F G H I M W)"}), 400
+    job = new_job(path, target)
+    return jsonify({"scan_id": job["scan_id"]})
+
+@app.route("/close/<scan_id>", methods=["POST"])
+def close(scan_id):
+    job = JOBS.get(scan_id)
+    if job:
+        job["cancel"] = True            # signale l'annulation au thread de scan
+        p = job.get("proc")
+        if p:
+            try:
+                p.kill()                 # tue le process semgrep en cours
+            except Exception:
+                pass
+    with JLOCK:
+        JOBS.pop(scan_id, None)
+    persist()
+    return jsonify({"ok": True})
 
 @app.route("/stream/<scan_id>")
 def stream(scan_id):
@@ -143,19 +215,18 @@ def stream(scan_id):
     if not job:
         return "no job", 404
     def gen():
-        q = job["q"]
+        last = -1
         while True:
-            try:
-                kind, payload = q.get(timeout=30)
-            except queue.Empty:
-                yield ": ping\n\n"
-                continue
-            if kind == "log":
-                yield "event: log\ndata: " + json.dumps(payload) + "\n\n"
-            elif kind == "progress":
-                yield "event: progress\ndata: " + json.dumps(payload) + "\n\n"
-            elif kind == "done":
-                yield "event: done\ndata: " + json.dumps(job["result"]) + "\n\n"
+            with JCOND:
+                if job["version"] == last:
+                    JCOND.wait(timeout=25)
+                if job["version"] == last:
+                    yield ": ping\n\n"
+                    continue
+                last = job["version"]
+                snap = snapshot(job)
+            yield "event: state\ndata: " + json.dumps(snap) + "\n\n"
+            if snap["status"] in ("done", "err"):
                 break
     return Response(gen(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -272,22 +343,23 @@ PAGE = r"""
  @media(max-width:820px){.app{grid-template-columns:1fr}
    .side{border-right:0;border-bottom:1px solid var(--bd2)}
    .stats{grid-template-columns:repeat(2,1fr)}}
- /* onglets style Zed */
- .tabs{display:flex;align-items:stretch;background:var(--panel);flex:0 0 auto;
-   border-bottom:1px solid var(--bd2);overflow-x:auto;min-height:32px}
- .tabs:empty{display:none}
- .tab{display:flex;align-items:center;gap:7px;padding:0 12px;cursor:pointer;
-   color:var(--mut);font-size:12px;white-space:nowrap;max-width:220px;
-   background:var(--panel);border-right:1px solid var(--bd2)}
- .tab:hover{color:var(--tx)}
+ /* onglets style Zed - liste verticale en bas de la sidebar */
+ .tabs{display:flex;flex-direction:column;gap:1px;margin-top:auto;
+   border-top:1px solid var(--bd2);padding-top:10px;overflow-y:auto;max-height:45%}
+ .tabs:empty{display:none;margin-top:0;border-top:0;padding-top:0}
+ .tab{display:flex;align-items:center;gap:8px;padding:6px 8px;cursor:pointer;
+   color:var(--mut);font-size:12px;white-space:nowrap;border-radius:var(--r)}
+ .tab:hover{color:var(--tx);background:var(--editor)}
  .tab.active{color:var(--tx);background:var(--editor)}
- .tab .tname{overflow:hidden;text-overflow:ellipsis}
- .tab .tdot{width:7px;height:7px;border-radius:50%;flex:0 0 auto}
+ .tab.active .tname{font-weight:500}
+ .tab .tname{overflow:hidden;text-overflow:ellipsis;flex:1}
+ .tab .tdot{width:7px;height:7px;min-width:7px;min-height:7px;border-radius:50%;
+   flex:0 0 7px;align-self:center}
  .tab .tdot.run{background:var(--acc);animation:pulse 1.1s infinite}
  .tab .tdot.done{background:var(--lo)}
  .tab .tdot.err{background:var(--hi)}
  @keyframes pulse{50%{opacity:.3}}
- .tab .x{opacity:0;font-size:14px;line-height:1;padding:1px 3px;border-radius:var(--r);color:var(--ph)}
+ .tab .x{opacity:0;font-size:14px;line-height:1;padding:1px 4px;border-radius:var(--r);color:var(--ph);flex:0 0 auto}
  .tab:hover .x{opacity:.7}
  .tab .x:hover{opacity:1;background:var(--bd)}
  .view{display:none}.view.active{display:block}
@@ -296,9 +368,8 @@ PAGE = r"""
   <div class="logo"><span class="dot"></span>STV</div>
   <span class="sub">Semgrep Security Scanner</span>
   <div class="spacer"></div>
-  <span class="badge">F:\ &middot; W:\ montes (lecture seule)</span>
+  <span class="badge">C: D: F: G: H: I: M: W: (lecture seule)</span>
 </div>
-<div class="tabs" id="tabs"></div>
 <div class="app">
   <aside class="side">
     <form id="frm" class="field">
@@ -309,6 +380,7 @@ PAGE = r"""
       <button type="submit" id="btn">Lancer un nouveau scan</button>
       <div class="hint">Chaque scan ouvre un onglet. Ignore node_modules, .git, venv&hellip;</div>
     </form>
+    <div class="tabs" id="tabs"></div>
   </aside>
   <main class="main"><div class="inner" id="views">
     <div id="welcome" class="welcome"><div class="big">&#128737;</div>
@@ -342,30 +414,68 @@ function tabLabel(t){
  return t.name;
 }
 function renderTabs(){
- tabsEl.innerHTML='';
+ // MAJ en place: on ne recree pas les noeuds a chaque tick (sinon le clic sur la
+ // croix est avale car l'element disparait entre mousedown et click pendant un scan).
+ const seen=new Set();
  for(const t of TABS){
-   const el=document.createElement('div');
+   seen.add(t.id);
+   let el=tabsEl.querySelector('.tab[data-id="'+t.id+'"]');
+   if(!el){
+     el=document.createElement('div'); el.dataset.id=t.id;
+     el.innerHTML='<span class="tdot"></span><span class="tname"></span><span class="x">&times;</span>';
+     el.onclick=()=>select(t.id);
+     el.querySelector('.x').onclick=e=>{e.stopPropagation();closeTab(t.id);};
+     tabsEl.appendChild(el);
+   }
    el.className='tab'+(t.id===active?' active':'');
-   el.innerHTML='<span class="tdot '+t.status+'"></span>'+
-     '<span class="tname">'+esc(tabLabel(t))+'</span><span class="x">&times;</span>';
-   el.querySelector('.tname').onclick=()=>select(t.id);
-   el.querySelector('.tdot').onclick=()=>select(t.id);
-   el.querySelector('.x').onclick=e=>{e.stopPropagation();closeTab(t.id);};
-   tabsEl.appendChild(el);
+   el.querySelector('.tdot').className='tdot '+t.status;
+   el.querySelector('.tname').textContent=tabLabel(t);
  }
+ // retire les onglets disparus
+ tabsEl.querySelectorAll('.tab').forEach(el=>{
+   if(!seen.has(+el.dataset.id)) el.remove();
+ });
 }
 function select(id){active=id;
  for(const t of TABS) t.view.classList.toggle('active',t.id===id);
  renderTabs();
 }
-function closeTab(id){
+async function closeTab(id){
  const t=TABS.find(x=>x.id===id); if(!t)return;
  if(t.es) t.es.close(); t.view.remove();
+ if(t.scan_id){ try{ await fetch('/close/'+t.scan_id,{method:'POST'}); }catch(e){} }
  TABS=TABS.filter(x=>x.id!==id);
  if(active===id) active=TABS.length?TABS[TABS.length-1].id:null;
  if(active) select(active);
- renderTabs();
+ renderTabs(); saveTabs();
  if(!TABS.length) welcome.style.display='';
+}
+// persiste l'ordre/selection des onglets (les donnees vivent cote serveur)
+function saveTabs(){
+ try{ localStorage.setItem('stv_tabs', JSON.stringify(
+   {order:TABS.map(t=>t.scan_id).filter(Boolean), active:(TABS.find(t=>t.id===active)||{}).scan_id||null}
+ )); }catch(e){}
+}
+// au chargement: recupere les jobs du serveur, reconstruit les onglets
+async function restore(){
+ let jobs=[]; try{ jobs=await (await fetch('/jobs')).json(); }catch(e){}
+ if(!jobs.length){ welcome.style.display=''; return; }
+ welcome.style.display='none';
+ let pref={order:[],active:null};
+ try{ pref=JSON.parse(localStorage.getItem('stv_tabs'))||pref; }catch(e){}
+ // ordre: d'abord ceux memorises, puis le reste
+ const byId={}; jobs.forEach(j=>byId[j.scan_id]=j);
+ const ordered=[...pref.order.filter(id=>byId[id]),
+   ...jobs.map(j=>j.scan_id).filter(id=>!pref.order.includes(id))];
+ let activeId=null;
+ for(const sid of ordered){
+   const j=byId[sid];
+   const tab=attach(j.scan_id, j.path, {select:false, nowire:true});
+   applyState(tab, j);           // etat courant immediat
+   if(j.status==='run') wire(tab); // continue a suivre les scans en cours
+   if(sid===pref.active) activeId=tab.id;
+ }
+ select(activeId||TABS[TABS.length-1].id);
 }
 
 function newView(name){
@@ -382,73 +492,85 @@ function newView(name){
 
 function norm(p){return p.replace(/[\\/]+$/,'').replace(/\\/g,'/').toLowerCase();}
 
+// cree l'onglet + la vue pour un scan_id serveur, puis s'abonne a son etat.
+function attach(scan_id, path, opts){
+ opts=opts||{};
+ const id=++seq;
+ const view=newView(base(path));
+ const tab={id,scan_id,name:base(path),path,status:'run',pct:0,count:0,view,es:null};
+ TABS.push(tab);
+ if(opts.select!==false) select(id); else renderTabs();
+ if(opts.err){ tab.status='err'; renderTabs();
+   view.querySelector('.prog').classList.remove('on');
+   const ev=view.querySelector('.err'); ev.textContent='Erreur: '+opts.err;
+   ev.style.display='block'; return tab; }
+ if(!opts.nowire) wire(tab);
+ return tab;
+}
+
 frm.addEventListener('submit',async e=>{
  e.preventDefault();
  const path=$('path').value.trim(); if(!path)return;
- // blocage doublon: si un scan de ce dossier existe deja (en cours ou fini), focus son onglet
  const dup=TABS.find(t=>norm(t.path)===norm(path));
  if(dup){
    select(dup.id);
    if(dup.status!=='run'){
      if(!confirm('Ce dossier a deja un onglet. Relancer le scan ?')){ $('path').value=''; return; }
-     closeTab(dup.id);
-   } else { $('path').value=''; return; }  // deja en cours -> juste focus
+     await closeTab(dup.id);
+   } else { $('path').value=''; return; }
  }
  welcome.style.display='none';
  let r;
  try{ r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({path})}); }catch(x){ alert('Erreur reseau'); return; }
  const data=await r.json();
- const id=++seq;
- const view=newView(base(path));
- const tab={id,name:base(path),path,status:'run',pct:0,count:0,view,es:null};
- TABS.push(tab); select(id);
- if(!r.ok){ tab.status='err'; renderTabs();
-   view.querySelector('.prog').classList.remove('on');
-   const ev=view.querySelector('.err'); ev.textContent='Erreur: '+(data.error||'?');
-   ev.style.display='block'; return; }
+ if(!r.ok){ attach(null, path, {err:data.error||'?'}); return; }
  $('path').value='';
- wire(tab, data.scan_id);
+ attach(data.scan_id, path);
+ saveTabs();
 });
 
-function wire(tab, scan_id){
+// applique un snapshot serveur a l'onglet (progression, fin, erreur)
+function applyState(tab, s){
  const v=tab.view, prog=v.querySelector('.prog'),
   pbar=v.querySelector('.bar>i'), pct=v.querySelector('.pct'),
-  lbl=v.querySelector('.lbl'), logEl=v.querySelector('.log'),
-  statsW=v.querySelector('.stats-wrap'), live=v.querySelector('.live'),
+  lbl=v.querySelector('.lbl'), statsW=v.querySelector('.stats-wrap'),
   out=v.querySelector('.out'), errEl=v.querySelector('.err');
- const es=new EventSource('/stream/'+scan_id); tab.es=es;
- es.addEventListener('log',ev=>{
-   const d=document.createElement('div'); d.textContent=JSON.parse(ev.data);
-   logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+ tab.pct=s.pct||0; statsW.innerHTML=statCards(s.counts);
+ if(s.status==='run'){
+   pbar.style.width=s.pct+'%'; pct.textContent=s.pct+'%';
+   lbl.textContent=(s.phase||'')+(s.total?' · '+s.total+' fichiers':'');
+   tab.status='run'; renderTabs(); return;
+ }
+ prog.classList.remove('on');
+ if(s.status==='err'){ tab.status='err'; renderTabs();
+   errEl.textContent='Erreur: '+(s.error||'?'); errEl.style.display='block';
+   saveTabs(); return; }
+ // done
+ const res=s.results||[]; const n=res.length;
+ tab.status='done'; tab.count=n; tab.results=res; renderTabs();
+ let h='';
+ if(!n){ h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>'; }
+ else{
+   h='<div class="toolbar"><button type="button" class="copybtn">Copier les '+n+' problemes</button></div>';
+   for(const r of res) h+=fcard(r);
+ }
+ out.innerHTML=h;
+ const cb=out.querySelector('.copybtn');
+ if(cb) cb.onclick=()=>copyResults(tab, cb);
+ saveTabs();
+}
+
+function wire(tab){
+ if(tab.es) tab.es.close();
+ const es=new EventSource('/stream/'+tab.scan_id); tab.es=es;
+ es.addEventListener('state',ev=>{
+   const s=JSON.parse(ev.data); applyState(tab, s);
+   if(s.status!=='run') es.close();
  });
- es.addEventListener('progress',ev=>{
-   const p=JSON.parse(ev.data);
-   pbar.style.width=p.pct+'%'; pct.textContent=p.pct+'%';
-   lbl.textContent=(p.phase||'')+(p.total?' · '+p.total+' fichiers':'');
-   tab.pct=p.pct; renderTabs();  // % dans l'onglet
-   statsW.innerHTML=statCards(p.counts);
- });
- es.addEventListener('done',ev=>{
-   es.close(); const d=JSON.parse(ev.data);
-   prog.classList.remove('on');
-   if(d.error){ tab.status='err'; renderTabs();
-     errEl.textContent='Erreur: '+d.error; errEl.style.display='block'; return; }
-   statsW.innerHTML=statCards(d.counts);
-   const n=d.results.length;
-   tab.status='done'; tab.count=n; renderTabs();
-   tab.results=d.results;
-   let h='';
-   if(!n){ h='<div class="empty"><div class="big">&#9989;</div>Aucune vulnerabilite trouvee.</div>'; }
-   else{
-     h='<div class="toolbar"><button type="button" class="copybtn">Copier les '+n+' problemes</button></div>';
-     for(const r of d.results) h+=fcard(r);
-   }
-   out.innerHTML=h;
-   const cb=out.querySelector('.copybtn');
-   if(cb) cb.onclick=()=>copyResults(tab, cb);
- });
- es.onerror=()=>{ es.close(); };
+ es.onerror=()=>{ es.close();
+   // job absent cote serveur (ex: conteneur relance sans reprise) -> marque perdu
+   if(tab.status==='run'){ /* reconnexion auto par EventSource sinon */ } };
 }
 
 function copyResults(tab, btn){
@@ -467,8 +589,10 @@ function fallbackCopy(txt,done){
  ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta);
  ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); done();
 }
+restore();  // reconstruit les onglets/scans au chargement (F5, reouverture)
 </script></body></html>
 """
 
 if __name__ == "__main__":
+    resume_jobs()  # reprend les scans non finis apres un redemarrage
     app.run(host="0.0.0.0", port=5000, threaded=True)

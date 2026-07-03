@@ -5,6 +5,16 @@ services:
     ports:
       - "5001:5000"
     volumes:
+      - "C:/:/host/c:ro"
+      - "D:/:/host/d:ro"
       - "F:/:/host/f:ro"
+      - "G:/:/host/g:ro"
+      - "H:/:/host/h:ro"
+      - "I:/:/host/i:ro"
+      - "M:/:/host/m:ro"
       - "W:/:/host/w:ro"
+      - "stv-state:/state"
     restart: unless-stopped
+
+volumes:
+  stv-state:
