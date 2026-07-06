@@ -8,9 +8,9 @@ RUN pip install --no-cache-dir flask semgrep
 # prechauffe: telecharge et cache les regles "auto" dans l'image (1er scan rapide)
 RUN mkdir -p /warm && echo "eval(x)" > /warm/t.py \
  && semgrep scan --config auto --quiet /warm/t.py >/dev/null 2>&1 || true
-COPY app.py /app/app.py
-COPY verscan.py /app/verscan.py
-COPY scanners.py /app/scanners.py
+COPY app.py app_api.py /app/
+COPY stv/ /app/stv/
+COPY templates/ /app/templates/
 WORKDIR /app
 EXPOSE 5000
 CMD ["python", "app.py"]

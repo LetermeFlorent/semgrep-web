@@ -43,6 +43,40 @@ Puis ouvre http://localhost:5001
 
 > `start.bat` génère `docker-compose.override.yml` avec les lettres de lecteur présentes, montées en lecture seule sous `/host/<lettre>`. Les emplacements autorisés au scan sont définis dans **Paramètres** (par défaut `F:\`, `W:\`).
 
+## Monter des disques / dossiers dans Docker
+
+Le conteneur ne voit que ce que tu montes. Chaque disque (ou dossier) doit être monté sous `/host/<lettre>` en **lecture seule** (`:ro`).
+
+**Windows — automatique** : `start.bat` détecte les lettres de lecteur présentes et génère `docker-compose.override.yml`, ex :
+
+```yaml
+services:
+  semgrep-ui:
+    volumes:
+      - "C:/:/host/c:ro"
+      - "W:/:/host/w:ro"
+```
+
+**Manuel** — ajoute tes montages dans un `docker-compose.override.yml` :
+
+```yaml
+services:
+  semgrep-ui:
+    volumes:
+      # un disque entier
+      - "D:/:/host/d:ro"
+      # ou un seul dossier (Linux/macOS)
+      - "/home/moi/projets:/host/projets:ro"
+```
+
+**Sans compose** (`docker run`) :
+
+```
+docker run -d -p 5001:5000 -v "W:/:/host/w:ro" -v stv-state:/state semgrep-web
+```
+
+> Règle : la partie après `:/host/` définit le nom vu dans l'app. Une lettre de lecteur (`w`) → chemin `W:\...`. Ensuite, autorise ces emplacements dans **Paramètres** (au premier lancement l'app te les propose automatiquement).
+
 ## Usage
 
 Tape un chemin (ex `W:\monprojet`), coche les analyses, clique **Lancer**. Les résultats s'affichent par sévérité (Critique / Moyen / Info) ; boutons d'export en haut de la liste.
