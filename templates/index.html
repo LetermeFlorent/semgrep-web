@@ -34,7 +34,7 @@
  .badge{font-size:11px;color:var(--mut);border:1px solid var(--bd);border-radius:var(--r);
    padding:2px 8px}
  /* layout */
- .app{display:grid;grid-template-columns:280px 1fr;flex:1;min-height:0;overflow:hidden}
+ .app{display:grid;grid-template-columns:320px 1fr;flex:1;min-height:0;overflow:hidden}
  .side{background:var(--panel);border-right:1px solid var(--bd2);padding:14px;
    overflow-y:auto;display:flex;flex-direction:column;gap:16px}
  .main{overflow-y:auto;padding:16px 20px;background:var(--editor)}
@@ -52,9 +52,11 @@
  button:hover:not(:disabled){filter:brightness(1.08)}
  button:disabled{opacity:.5;cursor:default}
  .hint{font-size:11px;color:var(--ph);line-height:1.4}
- label.ck{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--tx);
-   font-weight:400;margin:4px 0;cursor:pointer;text-transform:none}
- label.ck input{accent-color:var(--acc);cursor:pointer}
+ .cklist{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px 8px;margin-top:6px}
+ label.ck{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--tx);
+   font-weight:400;margin:0;cursor:pointer;text-transform:none;
+   overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+ label.ck input{accent-color:var(--acc);cursor:pointer;flex:0 0 auto}
  /* progress */
  .prog{display:none;flex-direction:column;gap:8px;background:var(--editor);
    border:1px solid var(--bd2);border-radius:var(--r6);padding:12px}
@@ -70,7 +72,7 @@
    background:var(--panel);border-radius:var(--r);padding:6px 8px}
  .log:empty{display:none}
  /* progression par scan */
- .steps{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+ .steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:12px 0}
  .steps:empty{display:none}
  .step{background:var(--panel);border:1px solid var(--bd2);border-radius:var(--r6);padding:8px 12px}
  .step.done{opacity:.7}
@@ -117,6 +119,10 @@
  .copybtn{width:auto;background:var(--panel);color:var(--tx);border:1px solid var(--bd);
    padding:5px 12px;font-size:12px;font-weight:500}
  .copybtn:hover:not(:disabled){filter:none;background:var(--bd2);border-color:var(--acc)}
+ .stopbtn{width:auto;background:transparent;color:var(--hi);border:1px solid var(--hi);
+   padding:3px 12px;font-size:11px;font-weight:500;border-radius:var(--r)}
+ .stopbtn:hover:not(:disabled){filter:none;background:var(--hi);color:#1a1d23}
+ .phead{align-items:center}
  .empty{color:var(--mut);padding:50px 20px;text-align:center;font-size:13px;grid-column:1/-1}
  .empty .big{font-size:38px;margin-bottom:10px}
  .welcome{color:var(--mut);padding:70px 20px;text-align:center}
@@ -226,19 +232,21 @@ W:\"></textarea>
       </div>
       <div>
         <label>Analyses a lancer</label>
-        <label class="ck"><input type="checkbox" id="sc-semgrep" checked> Code (Semgrep)</label>
-        <label class="ck"><input type="checkbox" id="sc-versions" checked> Versions des dependances</label>
-        <label class="ck"><input type="checkbox" id="sc-secrets" checked> Secrets (cles, tokens)</label>
-        <label class="ck"><input type="checkbox" id="sc-cve" checked> Vulnerabilites deps (CVE)</label>
+        <div class="cklist">
+        <label class="ck"><input type="checkbox" id="sc-semgrep" checked> Code</label>
+        <label class="ck"><input type="checkbox" id="sc-versions" checked> Versions</label>
+        <label class="ck"><input type="checkbox" id="sc-secrets" checked> Secrets</label>
+        <label class="ck"><input type="checkbox" id="sc-cve" checked> CVE deps</label>
         <label class="ck"><input type="checkbox" id="sc-iac" checked> Config / IaC</label>
         <label class="ck"><input type="checkbox" id="sc-license" checked> Licences</label>
         <label class="ck"><input type="checkbox" id="sc-sensitive" checked> Fichiers sensibles</label>
-        <label class="ck"><input type="checkbox" id="sc-secrets_history" checked> Secrets historique git</label>
-        <label class="ck"><input type="checkbox" id="sc-perms" checked> Permissions fichiers</label>
-        <label class="ck"><input type="checkbox" id="sc-hadolint" checked> Dockerfile (hadolint)</label>
-        <label class="ck"><input type="checkbox" id="sc-python"> Python SAST (bandit)</label>
-        <label class="ck"><input type="checkbox" id="sc-rust"> Rust CVE (cargo-audit)</label>
-        <label class="ck"><input type="checkbox" id="sc-java"> Java CVE (trivy)</label>
+        <label class="ck"><input type="checkbox" id="sc-secrets_history" checked> Secrets git</label>
+        <label class="ck"><input type="checkbox" id="sc-perms" checked> Permissions</label>
+        <label class="ck"><input type="checkbox" id="sc-hadolint" checked> Dockerfile</label>
+        <label class="ck"><input type="checkbox" id="sc-python"> Python SAST</label>
+        <label class="ck"><input type="checkbox" id="sc-rust"> Rust CVE</label>
+        <label class="ck"><input type="checkbox" id="sc-java"> Java CVE</label>
+        </div>
       </div>
       <div>
         <label for="ov-exclude">Exclure en plus (ce scan) &mdash; optionnel</label>
@@ -363,7 +371,8 @@ function newView(name){
  const v=document.createElement('div'); v.className='view';
  v.innerHTML=
   '<div class="prog on"><div class="phead"><span class="pct">0%</span>'+
-   '<span class="lbl">Preparation&hellip;</span></div>'+
+   '<span class="lbl">Preparation&hellip;</span>'+
+   '<button type="button" class="stopbtn">Arreter</button></div>'+
    '<div class="bar"><i></i></div><div class="log"></div></div>'+
   '<div class="steps"></div>'+
   '<div class="err" style="display:none"></div>'+
@@ -380,6 +389,9 @@ function attach(scan_id, path, opts){
  const id=++seq;
  const view=newView(base(path));
  const tab={id,scan_id,name:base(path),path,status:'run',pct:0,count:0,view,es:null,scans:opts.scans||['semgrep']};
+ // bouton Arreter cliquable immediatement (sans attendre le 1er event SSE)
+ const sb=view.querySelector('.stopbtn');
+ if(sb) sb.onclick=()=>stopScan(tab, sb);
  TABS.push(tab);
  if(opts.select!==false) select(id); else renderTabs();
  if(opts.err){ tab.status='err'; renderTabs();
@@ -521,11 +533,34 @@ async function loadDiff(tab, btn){
      '</div>':'');
 }
 
+async function stopScan(tab, btn){
+ if(btn){ btn.disabled=true; btn.textContent='Arret…'; }
+ const sid=tab.scan_id;
+ if(tab.es){ tab.es.close(); tab.es=null; }
+ if(sid){ try{ await fetch('/close/'+sid,{method:'POST'}); }catch(e){} }
+ // passe l'onglet en "arrete" : garde la vue, propose de relancer
+ tab.status='cancelled'; tab.scan_id=null; renderTabs();
+ const v=tab.view;
+ v.querySelector('.prog').classList.remove('on');
+ v.querySelector('.live').innerHTML='';
+ renderSteps(v, {});
+ const out=v.querySelector('.out');
+ out.innerHTML='<div class="toolbar">'+
+   '<button type="button" class="rescanbtn copybtn">Relancer</button></div>'+
+   '<div class="empty"><div class="big">&#9209;</div>Analyse arretee.</div>';
+ out.querySelector('.rescanbtn').onclick=()=>rescan(tab);
+ saveTabs();
+}
+
 async function rescan(tab){
  const old=tab.scan_id;
+ // relit les cases cochees maintenant (l'utilisateur a pu en (de)cocher depuis)
+ const scans=selectedScans();
+ if(!scans.length){ alert('Coche au moins une analyse.'); return; }
+ tab.scans=scans;
  let r;
  try{ r=await fetch('/start',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({path:tab.path,scans:tab.scans||['semgrep']})}); }catch(x){ alert('Erreur reseau'); return; }
+   body:JSON.stringify({path:tab.path,scans})}); }catch(x){ alert('Erreur reseau'); return; }
  const data=await r.json();
  if(!r.ok){ alert('Erreur: '+(data.error||'?')); return; }
  if(old){ try{ await fetch('/close/'+old,{method:'POST'}); }catch(e){} }
@@ -538,6 +573,8 @@ async function rescan(tab){
  v.querySelector('.lbl').textContent='Preparation…';
  v.querySelector('.err').style.display='none';
  v.querySelector('.out').innerHTML='';
+ const sb=v.querySelector('.stopbtn');
+ if(sb){ sb.disabled=false; sb.textContent='Arreter'; sb.onclick=()=>stopScan(tab, sb); }
  renderTabs(); wire(tab); saveTabs();
 }
 
@@ -600,19 +637,27 @@ $('cfgsave').onclick=async()=>{
      body:JSON.stringify(body)});
    if(!r.ok) throw 0;
    $('cfgmsg').textContent='Enregistre.'; setTimeout(closeCfg,700);
+   try{ renderBadge(await (await fetch('/mounts')).json()); }catch(e){}
  }catch(e){ $('cfgmsg').textContent='Echec de l\'enregistrement.'; }
 };
 
-// badge disques dynamique + accueil premier lancement
+// badge = emplacements AUTORISES (roots). Marque ceux non montes dans le conteneur.
+function renderBadge(m){
+ const badge=$('mountbadge'); if(!badge)return;
+ const roots=(m.roots||[]).map(r=>r.replace(/\\$/,''));
+ if(!roots.length){ badge.textContent='aucun emplacement autorise'; return; }
+ const mounted=new Set((m.mounted||[]).map(r=>r.replace(/\\$/,'').toUpperCase()));
+ badge.textContent=roots.map(r=>
+   mounted.has(r.toUpperCase())?r:r+' ⚠'   // ⚠ = autorise mais non monte
+ ).join('  ')+'  (lecture seule)';
+ badge.title='Emplacements autorises au scan (Parametres). ⚠ = non monte dans le conteneur.';
+}
+
+// badge + accueil premier lancement
 async function initMounts(){
  let m={mounted:[],roots:[],configured:true};
  try{ m=await (await fetch('/mounts')).json(); }catch(e){}
- const badge=$('mountbadge');
- if(badge){
-   badge.textContent=(m.mounted&&m.mounted.length
-     ? m.mounted.map(r=>r.replace(/\\$/,'')).join(' ')+' (lecture seule)'
-     : 'aucun disque monte');
- }
+ renderBadge(m);
  // premier lancement : pas de config -> propose les disques montes dans la modale
  if(!m.configured){
    await openCfg();
