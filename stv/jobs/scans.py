@@ -138,4 +138,10 @@ SCAN_FNS = {
     "iac": _mk_step("iac", "Config / IaC", scanfn=scanners.scan_iac),
     "license": _mk_step("license", "Licences", scanfn=scanners.scan_license),
     "sensitive": _mk_step("sensitive", "Fichiers sensibles", fn_needs_skip=True, scanfn=scanners.scan_sensitive),
+    "secrets_history": _mk_step("secrets_history", "Secrets historique git", scanfn=scanners.scan_secrets_history),
+    "perms": _mk_step("perms", "Permissions fichiers", fn_needs_skip=True, scanfn=scanners.scan_perms),
+    "hadolint": _mk_step("hadolint", "Dockerfile", scanfn=scanners.scan_hadolint),
+    "python": _mk_step("python", "Python SAST", fn_needs_skip=True, scanfn=scanners.scan_python),
+    "rust": _mk_step("rust", "Rust CVE", scanfn=scanners.scan_rust),
+    "java": _mk_step("java", "Java CVE", fn_needs_skip=True, scanfn=scanners.scan_java),
 }

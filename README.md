@@ -1,18 +1,26 @@
 # STV — Scanner de sécurité local
 
-Interface web locale qui scanne un dossier de code avec **7 analyses de sécurité** lancées **en parallèle**, sans compte ni cloud. Tout tourne dans un conteneur Docker ; tes disques sont montés en **lecture seule**.
+Interface web locale qui scanne un dossier de code avec **13 analyses de sécurité** lancées **en parallèle**, sans compte ni cloud. Tout tourne dans un conteneur Docker ; tes disques sont montés en **lecture seule**.
 
-## Les 7 analyses
+## Les 13 analyses
 
-| Analyse | Outil | Détecte |
-|---|---|---|
-| Code | Semgrep (règles `auto`) | injections, eval, patterns dangereux |
-| Versions | maison | dépendances obsolètes |
-| Secrets | Gitleaks | clés API, tokens, credentials |
-| CVE | Trivy + OSV.dev | vulnérabilités connues des dépendances |
-| Config / IaC | Trivy | mauvaises configs Docker/K8s/Terraform |
-| Licences | Trivy | licences à risque (GPL/AGPL…) |
-| Fichiers sensibles | maison | `.env`, `id_rsa`, `.pem`, dumps SQL… |
+| Analyse | Outil | Détecte | Coché défaut |
+|---|---|---|---|
+| Code | Semgrep (règles `auto`) | injections, eval, patterns dangereux | oui |
+| Versions | maison | dépendances obsolètes | oui |
+| Secrets | Gitleaks | clés API, tokens, credentials | oui |
+| CVE | Trivy + OSV.dev | vulnérabilités connues des dépendances | oui |
+| Config / IaC | Trivy | mauvaises configs Docker/K8s/Terraform | oui |
+| Licences | Trivy | licences à risque (GPL/AGPL…) | oui |
+| Fichiers sensibles | maison | `.env`, `id_rsa`, `.pem`, dumps SQL… | oui |
+| Secrets historique git | Gitleaks (mode git) | secrets commités puis effacés (restent dans l'historique) | oui |
+| Permissions | maison | fichiers world-writable, clés lisibles | oui |
+| Dockerfile | Hadolint | mauvaises pratiques d'image | oui |
+| Python SAST | Bandit + pip-audit | failles Python + CVE PyPI | non |
+| Rust CVE | cargo-audit | advisories RustSec (via `Cargo.lock`) | non |
+| Java CVE | Trivy | CVE des deps Java (pom.xml, jar, gradle) | non |
+
+Les 3 scans par langage (Python/Rust/Java) ne sont pas cochés par défaut : coche-les selon la techno du projet.
 
 ## Fonctionnalités
 
@@ -93,7 +101,7 @@ Paramètres : `scans` (liste, défaut = toutes), `fail_on` = `ERROR` | `WARNING`
 
 ## Stack
 
-Flask (Python 3.12) · Semgrep · Trivy · Gitleaks · OSV.dev — le tout conteneurisé. Aucune écriture sur les disques scannés (montés `:ro`). État (config, historique, statuts) dans un volume Docker `stv-state`.
+Flask (Python 3.12) · Semgrep · Trivy · Gitleaks · Hadolint · Bandit · pip-audit · cargo-audit · OSV.dev — le tout conteneurisé. Aucune écriture sur les disques scannés (montés `:ro`). État (config, historique, statuts) dans un volume Docker `stv-state`.
 
 ## Fichiers
 

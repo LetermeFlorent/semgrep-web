@@ -12,8 +12,11 @@ STATE_FILE = os.environ.get("STV_STATE", "/state/jobs.json")
 
 LABELS = {"semgrep": "Code", "versions": "Deps", "secrets": "Secrets",
           "cve": "CVE", "iac": "IaC", "license": "Licences",
-          "sensitive": "Fichiers"}
-ALL_SCANS = ["semgrep", "versions", "secrets", "cve", "iac", "license", "sensitive"]
+          "sensitive": "Fichiers", "secrets_history": "Secrets git",
+          "perms": "Permissions", "hadolint": "Dockerfile",
+          "python": "Python SAST", "rust": "Rust CVE", "java": "Java CVE"}
+ALL_SCANS = ["semgrep", "versions", "secrets", "cve", "iac", "license", "sensitive",
+             "secrets_history", "perms", "hadolint", "python", "rust", "java"]
 
 
 def snapshot(job):

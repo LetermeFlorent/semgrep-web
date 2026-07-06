@@ -233,6 +233,12 @@ W:\"></textarea>
         <label class="ck"><input type="checkbox" id="sc-iac" checked> Config / IaC</label>
         <label class="ck"><input type="checkbox" id="sc-license" checked> Licences</label>
         <label class="ck"><input type="checkbox" id="sc-sensitive" checked> Fichiers sensibles</label>
+        <label class="ck"><input type="checkbox" id="sc-secrets_history" checked> Secrets historique git</label>
+        <label class="ck"><input type="checkbox" id="sc-perms" checked> Permissions fichiers</label>
+        <label class="ck"><input type="checkbox" id="sc-hadolint" checked> Dockerfile (hadolint)</label>
+        <label class="ck"><input type="checkbox" id="sc-python"> Python SAST (bandit)</label>
+        <label class="ck"><input type="checkbox" id="sc-rust"> Rust CVE (cargo-audit)</label>
+        <label class="ck"><input type="checkbox" id="sc-java"> Java CVE (trivy)</label>
       </div>
       <div>
         <label for="ov-exclude">Exclure en plus (ce scan) &mdash; optionnel</label>
@@ -255,7 +261,7 @@ const $=id=>document.getElementById(id);
 const frm=$('frm'),tabsEl=$('tabs'),viewsEl=$('views'),welcome=$('welcome');
 let TABS=[], active=null, seq=0;
 
-const SCAN_IDS=['semgrep','versions','secrets','cve','iac','license','sensitive'];
+const SCAN_IDS=['semgrep','versions','secrets','cve','iac','license','sensitive','secrets_history','perms','hadolint','python','rust','java'];
 function selectedScans(){return SCAN_IDS.filter(id=>{const e=$('sc-'+id);return e&&e.checked;});}
 function esc(s){return (s+'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function base(p){const s=p.replace(/[\\/]+$/,'').split(/[\\/]/);return s[s.length-1]||p;}
@@ -410,7 +416,8 @@ frm.addEventListener('submit',async e=>{
 });
 
 const SCAN_LABELS={semgrep:'Code',versions:'Deps',secrets:'Secrets',cve:'CVE',
-  iac:'IaC',license:'Licences',sensitive:'Fichiers'};
+  iac:'IaC',license:'Licences',sensitive:'Fichiers',secrets_history:'Secrets git',
+  perms:'Permissions',hadolint:'Dockerfile',python:'Python SAST',rust:'Rust CVE',java:'Java CVE'};
 // affiche une carte de progression par scan (nom, phase, mini-barre, %)
 function renderSteps(v, steps){
  const box=v.querySelector('.steps'); if(!box)return;
